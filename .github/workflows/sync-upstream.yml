@@ -1,0 +1,64 @@
+name: Sync fork from upstream
+
+on:
+  schedule:
+    # 03:17 UTC — off the top of the hour, where scheduled runs queue longest.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Fast-forward default branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream into the default branch
+        env:
+          # A personal access token with `repo` + `workflow` scope is required
+          # when upstream changes files under .github/workflows. Without it the
+          # built-in token is used and such syncs are rejected.
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          before="$(gh api "repos/$REPO/commits/$BRANCH" --jq '.sha')"
+
+          if ! response="$(gh api --method POST "repos/$REPO/merge-upstream" \
+              -f branch="$BRANCH" 2>&1)"; then
+            {
+              echo "### Upstream sync failed"
+              echo
+              echo "The default branch could not be fast-forwarded. This usually"
+              echo "means the fork has diverged from upstream, or the token lacks"
+              echo "permission to update workflow files."
+              echo
+              echo '```'
+              echo "$response"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::merge-upstream failed"
+            exit 1
+          fi
+
+          merge_type="$(printf '%s' "$response" | jq -r '.merge_type // "unknown"')"
+          after="$(gh api "repos/$REPO/commits/$BRANCH" --jq '.sha')"
+
+          {
+            echo "### Upstream sync"
+            echo
+            echo "- Branch: \`$BRANCH\`"
+            echo "- Result: \`$merge_type\`"
+            if [ "$before" = "$after" ]; then
+              echo "- Already up to date at \`${before:0:7}\`"
+            else
+              echo "- Updated \`${before:0:7}\` → \`${after:0:7}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
